@@ -98,7 +98,7 @@ this:
 
 ```python
 """Raises:
-    ValueError: if the input is empty
+ValueError: if the input is empty
 """
 
 """Raises
