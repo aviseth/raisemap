@@ -17,8 +17,22 @@ from pathlib import Path
 
 from raisemap.models import Function
 
-LOCK_VERSION = 1
+LOCK_VERSION = 2
 DEFAULT_PATH = "raisemap.lock"
+
+
+@dataclass
+class Lock:
+    """What a lock file holds.
+
+    ``public`` is every public function the recording run saw, not only the ones
+    that raise. Without it a key missing from ``functions`` is ambiguous: the
+    function might be new, or it might have existed and started raising, and only
+    the second is a change in behaviour worth failing a build over.
+    """
+
+    functions: dict[str, list[str]] = field(default_factory=dict)
+    public: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -43,26 +57,48 @@ def build(functions: dict[str, Function], *, public_only: bool = True) -> dict[s
     }
 
 
-def read(path: str | Path = DEFAULT_PATH) -> dict[str, list[str]]:
+def lockable_keys(functions: dict[str, Function], *, public_only: bool = True) -> set[str]:
+    """Every function the lock could contain, whether it raises anything or not."""
+    return {key for key, function in functions.items() if function.is_public or not public_only}
+
+
+def read(path: str | Path = DEFAULT_PATH) -> Lock:
     """Read a lock file. A missing file is an empty lock, not an error."""
     file = Path(path)
     if not file.is_file():
-        return {}
+        return Lock()
     data = json.loads(file.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        # A corrupt but parsable lock is realistic after a bad merge, and an
+        # AttributeError out of here reaches the user as a traceback.
+        raise ValueError(
+            f"{file}: expected an object at the top level, found {type(data).__name__}"
+        )
     version = data.get("version")
     if version != LOCK_VERSION:
         raise ValueError(
             f"{file}: unsupported lock version {version!r}; delete it and re-run "
             "'raisemap check --update' to regenerate"
         )
-    return {k: list(v) for k, v in (data.get("functions") or {}).items()}
+    functions = data.get("functions") or {}
+    public = data.get("public") or []
+    if not isinstance(functions, dict) or not isinstance(public, list):
+        raise ValueError(f"{file}: 'functions' must be an object and 'public' a list")
+    return Lock(
+        functions={k: list(v) for k, v in functions.items()},
+        public=set(public),
+    )
 
 
-def write(path: str | Path, functions: dict[str, list[str]]) -> None:
+def write(path: str | Path, lock: Lock) -> None:
     """Write the lock file, sorted, with a trailing newline so diffs stay clean."""
     file = Path(path)
     file.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"version": LOCK_VERSION, "functions": dict(sorted(functions.items()))}
+    payload = {
+        "version": LOCK_VERSION,
+        "functions": dict(sorted(lock.functions.items())),
+        "public": sorted(lock.public),
+    }
     file.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
@@ -82,6 +118,12 @@ def compare(locked: dict[str, list[str]], current: dict[str, list[str]]) -> list
     return drifts
 
 
-def newly_raising(locked: dict[str, list[str]], current: dict[str, list[str]]) -> list[str]:
-    """Public functions that raise now and did not appear in the lock at all."""
-    return sorted(set(current) - set(locked))
+def newly_raising(lock: Lock, current: dict[str, list[str]]) -> list[str]:
+    """Functions that existed and have started raising.
+
+    A key absent from ``lock.functions`` means either the function is new or it
+    existed and raised nothing. Reporting both would contradict ``compare``,
+    which deliberately says nothing about functions that did not exist before.
+    ``lock.public`` is what tells them apart.
+    """
+    return sorted((set(current) - set(lock.functions)) & lock.public)

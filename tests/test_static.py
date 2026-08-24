@@ -197,3 +197,44 @@ def test_provenance_is_recorded_for_every_exception():
     source = "def inner():\n    raise ValueError('no')\n\n\ndef outer():\n    return inner()\n"
     sources = analyze(source)["demo.outer"].raises.exceptions["ValueError"]
     assert any("propagates" in str(s) for s in sources)
+
+
+def test_a_project_subclass_caught_in_the_same_body_is_suppressed(tmp_path):
+    """The discriminating case: suppression inside one function, not across a call.
+
+    That path uses the hierarchy handed to analyze_source, so it only works if
+    discovery collects the project's exception classes before re-reading the
+    files. raisemap's own config.py has exactly this shape.
+    """
+    from raisemap.discover import analyze
+
+    (tmp_path / "m.py").write_text(
+        "class ConfigError(ValueError):\n    pass\n\n\n"
+        "def f():\n    try:\n        raise ConfigError('no')\n"
+        "    except ValueError:\n        return None\n"
+    )
+    functions, _ = analyze([tmp_path])
+    assert functions["m.f"].raises.names() == set()
+
+
+def test_a_deep_call_chain_reaches_a_fixed_point(tmp_path):
+    """A chain longer than the old ten-pass cap, defined outermost first."""
+    from raisemap.discover import analyze
+
+    depth = 25
+    lines = ["def f0():\n    raise ValueError('no')\n"]
+    body = "\n\n".join(f"def f{i}():\n    return f{i - 1}()" for i in range(1, depth))
+    (tmp_path / "m.py").write_text(body + "\n\n\n" + lines[0])
+    functions, _ = analyze([tmp_path])
+    assert functions[f"m.f{depth - 1}"].raises.names() == {"ValueError"}
+
+
+def test_a_file_that_cannot_be_decoded_does_not_end_the_run(tmp_path):
+    from raisemap.discover import analyze
+
+    (tmp_path / "bad.py").write_bytes(
+        b"# -*- coding: latin-1 -*-\ns = '\xe9'\n".replace(b"\xe9", b"\xff")
+    )
+    (tmp_path / "good.py").write_text("def f():\n    raise ValueError('no')\n")
+    functions, _ = analyze([tmp_path])
+    assert "good.f" in functions

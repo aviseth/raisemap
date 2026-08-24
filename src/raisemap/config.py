@@ -45,11 +45,24 @@ def load(path: Path | None = None) -> Config:
     pyproject = path or find_pyproject()
     if pyproject is None:
         return Config()
-    with pyproject.open("rb") as handle:
-        data = tomllib.load(handle)
-    section = data.get("tool", {}).get("raisemap")
-    if not isinstance(section, dict):
+    try:
+        with pyproject.open("rb") as handle:
+            data = tomllib.load(handle)
+    except tomllib.TOMLDecodeError as error:
+        raise ConfigError(f"{pyproject}: not valid TOML: {error}") from error
+
+    tool = data.get("tool")
+    if tool is None:
         return Config(source=pyproject)
+    if not isinstance(tool, dict):
+        raise ConfigError(f"{pyproject}: [tool] must be a table, not {type(tool).__name__}")
+    section = tool.get("raisemap")
+    if section is None:
+        return Config(source=pyproject)
+    if not isinstance(section, dict):
+        raise ConfigError(
+            f"{pyproject}: [tool.raisemap] must be a table, not {type(section).__name__}"
+        )
 
     def strings(key: str) -> list[str]:
         value = section.get(key, [])
@@ -61,9 +74,15 @@ def load(path: Path | None = None) -> Config:
     if not isinstance(require, bool):
         raise ConfigError(f"{pyproject}: require_docstrings must be true or false")
 
+    lock = section.get("lock", "raisemap.lock")
+    if not isinstance(lock, str) or not lock.strip():
+        # str() of a list would give a path of "['a']", which the CLI then
+        # reads and writes.
+        raise ConfigError(f"{pyproject}: lock must be a path, not {lock!r}")
+
     return Config(
         paths=[pyproject.parent / p for p in strings("paths")],
-        lock=pyproject.parent / str(section.get("lock", "raisemap.lock")),
+        lock=pyproject.parent / lock,
         require_docstrings=require,
         ignore=set(strings("ignore")),
         source=pyproject,

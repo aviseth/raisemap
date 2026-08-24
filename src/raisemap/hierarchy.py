@@ -34,7 +34,6 @@ BUILTIN_PARENTS: dict[str, str] = {
     "NameError": "Exception",
     "UnboundLocalError": "NameError",
     "OSError": "Exception",
-    "IOError": "OSError",
     "BlockingIOError": "OSError",
     "ChildProcessError": "OSError",
     "ConnectionError": "OSError",
@@ -84,6 +83,19 @@ BUILTIN_PARENTS: dict[str, str] = {
     "decimal.InvalidOperation": "Exception",
 }
 
+#: Names that are the same class, not a subclass of it. `except IOError` really
+#: does catch a raised OSError, because at runtime they are one object.
+ALIASES: dict[str, str] = {
+    "IOError": "OSError",
+    "EnvironmentError": "OSError",
+    "WindowsError": "OSError",
+    "socket.error": "OSError",
+}
+
+
+def canonical(name: str) -> str:
+    return ALIASES.get(name, ALIASES.get(name.split(".")[-1], name))
+
 
 class Hierarchy:
     """Ancestry lookup for exception names, builtin plus whatever the project defines."""
@@ -92,9 +104,9 @@ class Hierarchy:
         self.project = project or {}
 
     def ancestors(self, name: str) -> set[str]:
-        """Every name ``name`` is a subclass of, including itself."""
+        """Every name ``name`` is a subclass of, including itself and its aliases."""
         seen: set[str] = set()
-        pending = [name]
+        pending = [name, canonical(name)]
         while pending:
             current = pending.pop()
             if current in seen:
@@ -114,7 +126,17 @@ class Hierarchy:
         if handler == "BaseException":
             return True
         ancestry = self.ancestors(raised)
-        return handler in ancestry or handler.split(".")[-1] in {a.split(".")[-1] for a in ancestry}
+        ancestry |= {canonical(name) for name in ancestry}
+        if handler in ancestry or canonical(handler) in ancestry:
+            return True
+        # An undotted handler is a name that was imported directly, so matching
+        # it against the tail of a dotted ancestor is right: `except
+        # JSONDecodeError` does catch json.JSONDecodeError. A dotted handler is
+        # already qualified, and matching only its tail would have
+        # `except re.error` swallow a raised struct.error.
+        if "." in handler:
+            return False
+        return handler in {name.split(".")[-1] for name in ancestry}
 
 
 #: Used when no project classes have been collected.

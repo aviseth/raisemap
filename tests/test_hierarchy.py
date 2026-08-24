@@ -69,3 +69,21 @@ def test_a_cycle_does_not_hang():
 
 def test_an_unknown_exception_is_only_itself():
     assert BUILTIN_ONLY.ancestors("SomeThirdPartyError") == {"SomeThirdPartyError"}
+
+
+def test_ioerror_is_the_same_class_as_oserror_not_a_subclass():
+    """At runtime they are one object, so `except IOError` does catch an OSError."""
+    assert BUILTIN_ONLY.catches("IOError", "OSError")
+    assert BUILTIN_ONLY.catches("OSError", "IOError")
+    assert BUILTIN_ONLY.catches("EnvironmentError", "OSError")
+
+
+def test_a_dotted_handler_does_not_match_an_unrelated_tail():
+    """`except re.error` must not swallow a raised struct.error."""
+    assert not BUILTIN_ONLY.catches("re.error", "struct.error")
+    assert not BUILTIN_ONLY.catches("binascii.Error", "pkg.Error")
+
+
+def test_an_undotted_handler_still_matches_a_dotted_ancestor():
+    """A name imported directly is written undotted, and does catch."""
+    assert BUILTIN_ONLY.catches("JSONDecodeError", "json.JSONDecodeError")

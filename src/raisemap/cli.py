@@ -4,18 +4,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import sys
 from pathlib import Path
 
 from raisemap import __version__
+from raisemap.models import Function
 
 EPILOG = """\
 examples:
   raisemap show src
   raisemap show src --function mypkg.io.load_config
   raisemap docs src
-  raisemap observe src -- pytest -q
+  raisemap observe src --command "pytest -q"
   raisemap check --update
 """
 
@@ -87,14 +89,14 @@ def _paths(args: argparse.Namespace) -> list[Path]:
     return configured or [Path()]
 
 
-def _analyze(args: argparse.Namespace):  # type: ignore[no-untyped-def]
+def _analyze(args: argparse.Namespace) -> dict[str, Function]:
     from raisemap.discover import analyze
 
     functions, _ = analyze(_paths(args))
     return functions
 
 
-def _visible(functions, show_all: bool):  # type: ignore[no-untyped-def]
+def _visible(functions: dict[str, Function], show_all: bool) -> dict[str, Function]:
     return {
         key: function
         for key, function in sorted(functions.items())
@@ -207,7 +209,13 @@ def _observe(args: argparse.Namespace) -> int:
 
     paths = _paths(args)
     functions = _analyze(args)
-    command = shlex.split(args.run) if args.run else [sys.executable, "-m", "pytest", "-q"]
+    # posix=False on Windows: the default treats a backslash as an escape, so
+    # --command "C:\\Python\\python.exe -m pytest" would lose its separators.
+    command = (
+        shlex.split(args.run, posix=os.name != "nt")
+        if args.run
+        else [sys.executable, "-m", "pytest", "-q"]
+    )
 
     try:
         seen = observe(command, roots=paths, timeout=args.timeout)
@@ -252,14 +260,15 @@ def _check(args: argparse.Namespace) -> int:
     config = load(args.config)
     functions = _analyze(args)
     current = lockfile.build(functions)
+    lock = lockfile.Lock(functions=current, public=lockfile.lockable_keys(functions))
     locked = lockfile.read(config.lock)
 
     if args.update:
-        lockfile.write(config.lock, current)
-        print(f"wrote {config.lock} with {len(current)} public function(s)")
+        lockfile.write(config.lock, lock)
+        print(f"wrote {config.lock} with {len(current)} raising public function(s)")
         return 0
 
-    if not locked:
+    if not locked.functions and not locked.public:
         print(
             f"raisemap: no lock at {config.lock}. Run 'raisemap check --update' to record "
             f"what the public API raises today.",
@@ -267,7 +276,7 @@ def _check(args: argparse.Namespace) -> int:
         )
         return 2
 
-    drifts = lockfile.compare(locked, current)
+    drifts = lockfile.compare(locked.functions, current)
     added = lockfile.newly_raising(locked, current)
 
     if args.json:

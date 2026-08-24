@@ -30,13 +30,19 @@ def test_build_can_include_private_functions():
 
 def test_round_trip(tmp_path):
     path = tmp_path / "raisemap.lock"
-    lockfile.write(path, {"m.f": ["OSError", "ValueError"]})
+    lockfile.write(
+        path, lockfile.Lock(functions={"m.f": ["OSError", "ValueError"]}, public={"m.f", "m.g"})
+    )
     assert path.read_text().endswith("\n")
-    assert lockfile.read(path) == {"m.f": ["OSError", "ValueError"]}
+    back = lockfile.read(path)
+    assert back.functions == {"m.f": ["OSError", "ValueError"]}
+    assert back.public == {"m.f", "m.g"}
 
 
 def test_a_missing_lock_reads_as_empty(tmp_path):
-    assert lockfile.read(tmp_path / "nope.lock") == {}
+    empty = lockfile.read(tmp_path / "nope.lock")
+    assert empty.functions == {}
+    assert empty.public == set()
 
 
 def test_an_unknown_version_is_an_error(tmp_path):
@@ -69,17 +75,40 @@ def test_a_deleted_function_is_not_drift_either():
     assert lockfile.compare({"m.gone": ["ValueError"]}, {}) == []
 
 
-def test_newly_raising_lists_functions_absent_from_the_lock():
-    assert lockfile.newly_raising(
-        {"m.f": ["ValueError"]}, {"m.f": ["ValueError"], "m.g": ["OSError"]}
-    ) == ["m.g"]
+def test_a_function_that_existed_and_started_raising_is_reported():
+    lock = lockfile.Lock(functions={"m.f": ["ValueError"]}, public={"m.f", "m.g"})
+    current = {"m.f": ["ValueError"], "m.g": ["OSError"]}
+    assert lockfile.newly_raising(lock, current) == ["m.g"]
+
+
+def test_a_function_that_did_not_exist_before_is_not_reported():
+    """compare says nothing about new functions, and this has to agree with it."""
+    lock = lockfile.Lock(functions={"m.f": ["ValueError"]}, public={"m.f"})
+    current = {"m.f": ["ValueError"], "m.brand_new": ["OSError"]}
+    assert lockfile.newly_raising(lock, current) == []
 
 
 def test_the_lock_is_written_sorted(tmp_path):
     path = tmp_path / "raisemap.lock"
-    lockfile.write(path, {"z": ["A"], "a": ["B"], "m": ["C"]})
+    lockfile.write(path, lockfile.Lock(functions={"z": ["A"], "a": ["B"], "m": ["C"]}))
     text = path.read_text()
     assert text.index('"a"') < text.index('"m"') < text.index('"z"')
+
+
+def test_a_lock_that_is_not_an_object_is_a_value_error(tmp_path):
+    path = tmp_path / "raisemap.lock"
+    path.write_text("[1, 2, 3]")
+    with pytest.raises(ValueError, match="expected an object"):
+        lockfile.read(path)
+
+
+def test_lockable_keys_includes_functions_that_raise_nothing():
+    functions = {
+        "m.raises": function("m.raises", "ValueError"),
+        "m.quiet": function("m.quiet"),
+        "m._private": function("m._private", "OSError", public=False),
+    }
+    assert lockfile.lockable_keys(functions) == {"m.raises", "m.quiet"}
 
 
 def test_raises_merge_keeps_provenance_from_both():

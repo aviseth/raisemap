@@ -13,6 +13,8 @@ ValueError is a contract. `x.y` raising AttributeError is a bug.
 
 from __future__ import annotations
 
+import ast
+
 #: Dotted call name -> exceptions it is documented to raise on bad input.
 KNOWN_RAISERS: dict[str, tuple[str, ...]] = {
     # builtins
@@ -73,15 +75,13 @@ KNOWN_RAISERS: dict[str, tuple[str, ...]] = {
 }
 
 
-def known_exceptions(name: str, node: object = None) -> tuple[str, ...]:
+def known_exceptions(name: str, node: ast.AST | None = None) -> tuple[str, ...]:
     """What a call to ``name`` is documented to raise, given how it was called.
 
     The node is used for the handful of calls whose contract depends on their
     arguments. ``getattr(x, "y")`` raises AttributeError; ``getattr(x, "y", None)``
     cannot, and reporting it would be a false positive in very common code.
     """
-    import ast
-
     if name == "getattr" and isinstance(node, ast.Call) and len(node.args) >= 3:
         return ()
     if name == "next" and isinstance(node, ast.Call) and len(node.args) >= 2:

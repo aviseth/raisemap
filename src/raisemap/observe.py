@@ -26,7 +26,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-RESULT_ENV = "RAISEMAP_OBSERVE"
+RESULT_ENV = "RAISEMAP_OBSERVE_DIR"
 ROOTS_ENV = "RAISEMAP_ROOTS"
 MIN_VERSION = (3, 12)
 
@@ -36,8 +36,13 @@ import atexit
 import os
 import sys
 
-_result = os.environ.get("RAISEMAP_OBSERVE")
-_roots = tuple(filter(None, os.environ.get("RAISEMAP_ROOTS", "").split(os.pathsep)))
+_dir = os.environ.get("RAISEMAP_OBSERVE_DIR")
+# Directories, each ending in a separator, so a root of /a/b does not also match
+# a sibling directory called /a/bc.
+_roots = tuple(
+    r if r.endswith(os.sep) else r + os.sep
+    for r in filter(None, os.environ.get("RAISEMAP_ROOTS", "").split(os.pathsep))
+)
 _seen = {}
 
 
@@ -50,11 +55,15 @@ def _record(code, instruction_offset, exception):
 
 
 def _report():
-    with open(_result, "w", encoding="utf-8") as handle:
+    # One file per process. Every process started under this PYTHONPATH inherits
+    # the variable, so a shared filename would have the last one to exit replace
+    # everything the others saw. Under xdist that is most of the run.
+    path = os.path.join(_dir, "observed-%d.json" % os.getpid())
+    with open(path, "w", encoding="utf-8") as handle:
         json.dump({k: sorted(v) for k, v in _seen.items()}, handle)
 
 
-if _result and sys.version_info >= (3, 12):
+if _dir and sys.version_info >= (3, 12):
     import json
 
     monitoring = sys.monitoring
@@ -101,15 +110,33 @@ class Observation:
         return self.by_function.get(f"{path}|{qualname}", set())
 
 
-def supported(python: str | None = None) -> bool:
+def usable(python: str | None = None) -> tuple[bool, str]:
+    """Whether ``python`` can run the observation pass, and why not if it cannot.
+
+    A path that does not exist is a different problem from an interpreter that
+    is too old, and telling someone their Python 3.13 is "older than 3.12" wastes
+    their afternoon.
+    """
     if python is None:
-        return sys.version_info >= MIN_VERSION
+        if sys.version_info >= MIN_VERSION:
+            return True, ""
+        return False, f"this interpreter is {sys.version.split()[0]}, older than 3.12"
     probe = "import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)"
     try:
-        completed = subprocess.run([python, "-c", probe], capture_output=True, check=False)
-        return completed.returncode == 0
-    except OSError:
-        return False
+        completed = subprocess.run(
+            [python, "-c", probe], capture_output=True, check=False, timeout=30
+        )
+    except OSError as error:
+        return False, f"{python} could not be run: {error}"
+    except subprocess.TimeoutExpired:
+        return False, f"{python} did not respond within 30s"
+    if completed.returncode != 0:
+        return False, f"{python} is older than 3.12"
+    return True, ""
+
+
+def supported(python: str | None = None) -> bool:
+    return usable(python)[0]
 
 
 def observe(
@@ -122,19 +149,21 @@ def observe(
 ) -> Observation:
     """Run ``command`` and record every exception that left a Python function."""
     interpreter = python or sys.executable
-    if not supported(interpreter):
+    ok, why = usable(interpreter)
+    if not ok:
         raise Unsupported(
-            f"{interpreter} is older than 3.12, which is where sys.monitoring arrived. "
-            "The runtime pass needs it; static analysis works on anything."
+            f"{why}. sys.monitoring is where the runtime pass gets its data, and it "
+            "arrived in 3.12. Static analysis works on anything."
         )
 
     with tempfile.TemporaryDirectory(prefix="raisemap-") as tmp:
         (Path(tmp) / "sitecustomize.py").write_text(_SITECUSTOMIZE, encoding="utf-8")
-        result_path = Path(tmp) / "observed.json"
+        results = Path(tmp) / "observations"
+        results.mkdir()
         env = {**os.environ}
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = os.pathsep.join([tmp, existing]) if existing else tmp
-        env[RESULT_ENV] = str(result_path)
+        env[RESULT_ENV] = str(results)
         env[ROOTS_ENV] = os.pathsep.join(str(Path(r).resolve()) for r in roots)
 
         try:
@@ -150,15 +179,23 @@ def observe(
         except subprocess.TimeoutExpired:
             return Observation(returncode=124, stderr=f"timed out after {timeout:g}s")
 
-        if not result_path.is_file():
+        merged: dict[str, set[str]] = {}
+        for report in sorted(results.glob("observed-*.json")):
+            try:
+                raw = json.loads(report.read_text(encoding="utf-8"))
+            except ValueError:  # pragma: no cover - a process killed mid-write
+                continue
+            for key, names in raw.items():
+                merged.setdefault(key, set()).update(names)
+
+        if not merged:
             return Observation(
                 returncode=completed.returncode,
                 stderr=(completed.stderr or completed.stdout).strip()[-2000:],
             )
-        raw = json.loads(result_path.read_text(encoding="utf-8"))
 
     return Observation(
-        by_function={key: set(value) for key, value in raw.items()},
+        by_function=merged,
         returncode=completed.returncode,
         stderr=(completed.stderr or "").strip()[-2000:],
     )

@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from raisemap.models import Function
-from raisemap.static import Module, analyze_file, propagate
+from raisemap.static import Module, analyze_file, collect_hierarchy, propagate
 
 EXCLUDED = {
     ".git",
@@ -38,13 +38,33 @@ def python_files(paths: Sequence[Path]) -> list[Path]:
 
 
 def analyze(paths: Sequence[Path]) -> tuple[dict[str, Function], list[Module]]:
-    """Analyse every file under ``paths`` and push exceptions along the call graph."""
-    modules = []
-    for file in python_files(paths):
-        try:
-            modules.append(analyze_file(file))
-        except SyntaxError:
-            # A file that does not parse is not analysable. Skipping it is better
-            # than refusing to analyse the rest of the project.
-            continue
-    return propagate(modules), modules
+    """Analyse every file under ``paths`` and push exceptions along the call graph.
+
+    Two passes, deliberately. The first only needs the exception classes the
+    project defines; the second re-reads each file with the whole project's
+    hierarchy in hand, so a function that raises its own ValueError subclass and
+    catches ValueError in the same body is correctly reported as raising
+    nothing. With one pass that suppression falls back to the builtin tree, and
+    the tool mis-reports its own source.
+    """
+    files = python_files(paths)
+    first = [module for module in (_read(file) for file in files) if module is not None]
+    tree = collect_hierarchy(first)
+
+    modules = [
+        module for module in (_read(file, hierarchy=tree) for file in files) if module is not None
+    ]
+    return propagate(modules, tree), modules
+
+
+def _read(file: Path, hierarchy: object = None) -> Module | None:
+    """Analyse one file, or return None if it cannot be read or parsed.
+
+    One unreadable file should not end the run. A module declaring a non-UTF-8
+    encoding raises UnicodeDecodeError and one the process cannot open raises
+    OSError, and neither is a SyntaxError.
+    """
+    try:
+        return analyze_file(file, hierarchy=hierarchy)  # type: ignore[arg-type]
+    except (SyntaxError, UnicodeDecodeError, OSError, ValueError):
+        return None

@@ -24,9 +24,11 @@ from raisemap.hierarchy import BUILTIN_ONLY, Hierarchy
 from raisemap.known import known_exceptions
 from raisemap.models import DIRECT, KNOWN, PROPAGATED, RERAISE, Function, Source
 
-#: How many times to walk the call graph before giving up on a fixed point.
-#: Mutual recursion converges quickly; this is a backstop, not a tuning knob.
-MAX_PASSES = 10
+#: Hard ceiling on propagation passes, as a guard against a bug rather than a
+#: tuning knob. One pass moves an exception at least one edge along the call
+#: graph, so a chain of N functions needs at most N passes; the real bound is
+#: computed from the function count and this only caps pathological input.
+MAX_PASSES = 1000
 
 
 @dataclass
@@ -121,7 +123,8 @@ def propagate(modules: list[Module], hierarchy: Hierarchy | None = None) -> dict
     for key, function in functions.items():
         by_short.setdefault(function.qualname.split(".")[-1], []).append(key)
 
-    for _ in range(MAX_PASSES):
+    passes = min(MAX_PASSES, len(functions) + 1)
+    for _ in range(passes):
         changed = False
         for key, function in functions.items():
             for site in sites.get(key, []):

@@ -77,3 +77,19 @@ def test_empty_docstrings(value):
 
 def test_the_singular_spelling_is_accepted():
     assert declared_exceptions("Do it.\n\nRaise:\n    ValueError: nope\n") == {"ValueError"}
+
+
+def test_a_numpy_section_after_raises_is_not_read_as_an_exception():
+    docstring = """Do a thing.
+
+Raises
+------
+ValueError
+    if x is empty
+
+Returns
+-------
+int
+    the answer
+"""
+    assert declared_exceptions(docstring) == {"ValueError"}

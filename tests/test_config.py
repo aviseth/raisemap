@@ -41,3 +41,18 @@ def test_ignore_must_be_strings(tmp_path):
 def test_require_docstrings_must_be_a_boolean(tmp_path):
     with pytest.raises(ConfigError, match="true or false"):
         load(write(tmp_path, '[tool.raisemap]\nrequire_docstrings = "yes"\n'))
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["tool = 1\n", "[tool]\nraisemap = 3\n", '[tool.raisemap]\nlock = ["a"]\n'],
+)
+def test_everything_invalid_surfaces_as_a_config_error(tmp_path, body):
+    """Anything else reaches the user as a traceback, since main only catches ours."""
+    with pytest.raises(ConfigError):
+        load(write(tmp_path, body))
+
+
+def test_broken_toml_is_a_config_error(tmp_path):
+    with pytest.raises(ConfigError, match="not valid TOML"):
+        load(write(tmp_path, "[tool.raisemap\n"))

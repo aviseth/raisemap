@@ -62,7 +62,16 @@ noise.
 
 Suppression understands the class hierarchy, including your own exception classes. If you define
 `class ConfigError(ValueError)` then `except ValueError` suppresses it, and raisemap reads that
-relationship out of your source rather than importing your package to find it.
+relationship out of your source rather than importing your package to find it. That works whether
+the catch is in the same function as the raise or several calls away, which is why analysis runs
+in two passes: one to collect the project's exception classes, one to use them.
+
+Aliases are understood too. `IOError` and `OSError` are one class at runtime, not a parent and a
+child, so `except IOError` correctly suppresses a raised `OSError`.
+
+A handler written with a dotted name is treated as qualified, so `except re.error` does not
+suppress a raised `struct.error` just because both end in `error`. An undotted handler is a name
+that was imported directly, so `except JSONDecodeError` does still catch `json.JSONDecodeError`.
 
 ### What is deliberately not inferred
 
@@ -113,7 +122,7 @@ ValueError
 ## Checking against a running program
 
 ```shell
-raisemap observe src -- pytest -q
+raisemap observe src --command "pytest -q"
 ```
 
 ```text
@@ -138,6 +147,10 @@ the interesting part:
 This uses `sys.monitoring`'s `PY_UNWIND` event, which fires exactly when an exception leaves a
 Python function. Below 3.12 the pass is skipped rather than approximated with a tracer that would
 change the timing of everything it measures.
+
+Every process started under the run inherits the instrumentation and writes its own report, which
+are merged afterwards. That means `pytest-xdist`, `multiprocessing`, and any subprocess your code
+spawns are all covered rather than the last one to exit replacing everything the others saw.
 
 ## Guarding the public API in CI
 
@@ -169,6 +182,10 @@ Run 'raisemap check --update' if this is intended.
 Only public functions are locked. A private helper gaining an exception is not somebody else's
 problem. Functions that are new or deleted are not reported as drift, since one has no previous
 behaviour and the other is a separate conversation.
+
+The lock records every public function the run saw, not just the ones that raise. Without that,
+a name missing from the list is ambiguous: the function might be new, or it might have existed and
+started raising, and only the second is a change in behaviour worth failing a build over.
 
 ## Configuration
 
@@ -218,7 +235,8 @@ instead of needing cycle detection.
 Nothing here imports the code being analysed. A tool that has to import your package to describe
 it is a tool that runs your import side effects.
 
-A file that does not parse is skipped rather than aborting the run.
+A file that cannot be parsed, decoded or opened is skipped rather than aborting the run. One
+module declaring a non-UTF-8 encoding should not cost you the analysis of everything else.
 
 ## Contributing
 
